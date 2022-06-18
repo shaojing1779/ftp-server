@@ -3,8 +3,7 @@ use std::net::{TcpListener, TcpStream};
 use std::{thread};
 use std::time;
 use std::env;
-
-const BSIZE : u32 = 1024;
+use rand::Rng;
 
 // Request type
 enum Cmdlist 
@@ -19,6 +18,21 @@ struct Command
 {
     command: String,
     arg: String,
+}
+
+// user connect info
+struct State
+{
+    // Connection mode: 0-NORMAL, 1-SERVER, 2-CLIENT
+    mode: i8,
+    user_name: String,
+    message: String,
+    /* PASV MOD*/
+    sock_pasv: u32,
+    /* PORT MOD*/
+    sock_port: u32,
+    /* Transport type 0-bin 1-ascii */
+    trans_type: i8,
 }
 
 static CMD_LIST_VALUE: &'static [&str] = &[
@@ -37,10 +51,25 @@ fn ftp_pass() -> String {
 }
 
 // PASV
-fn ftp_pasv() -> String {
-    let mut tu_port = (0, 0);
+fn ftp_pasv(state: &State) -> String {
+    let mut tu_port:(u16, u16) = (0, 0);
+
+    let mut rng = rand::thread_rng();
+
+    let seed: u16 = rng.gen();
+    tu_port.0 = 0b10000000 + seed % 0b1000000;
+    tu_port.1 = seed % 0xff;
+
+    // let mut ip: [u32; 4] = [0, 0, 0, 0];
+
+    let port = (0x100 * tu_port.0) + tu_port.1;
+    let addr = String::from("0.0.0.0:").to_string() + &port.to_string();
+    let listener = TcpListener::bind(addr).unwrap();
+
     "".to_owned()
 }
+
+
 fn get_pwd() -> String {
     let res = env::current_dir();
     match res {
@@ -63,11 +92,26 @@ fn ftp_syst() -> String {
     "200 🐶🐶 \n".to_owned()
 }
 
+// STOR
+fn ftp_stor() -> String {
+
+    "".to_owned()
+}
+
 fn handle_client(mut stream: TcpStream) -> Result<(), Error>{
     let mut buf = [0; 512];
     
     let welcome = "200 Welcome to FTP service.\n";
     stream.write(welcome.as_bytes())?;
+
+    let state = State {
+        user_name : "".to_owned(),
+        mode: 0,
+        message: "".to_owned(),
+        sock_pasv: 0,
+        sock_port: 0,
+        trans_type: 0,
+    };
 
     loop {
         let bytes_read = stream.read(&mut buf)?;
@@ -99,9 +143,10 @@ fn handle_client(mut stream: TcpStream) -> Result<(), Error>{
             "USER" => w_buf = ftp_user(),
             "PASS" => w_buf = ftp_pass(),
             "PWD" => w_buf = ftp_pwd(),
-            "PASV" => w_buf = ftp_pasv(),
+            "PASV" => w_buf = ftp_pasv(&state),
             "SYST" => w_buf = ftp_syst(),
             "LIST" => w_buf = ftp_list(),
+            "STOR" => w_buf = ftp_stor(),
             _=>println!("commond invalid!"),
         }
         stream.write(&w_buf.as_bytes())?;
@@ -113,8 +158,8 @@ fn handle_client(mut stream: TcpStream) -> Result<(), Error>{
 
 fn server(port: &u32)  -> Result<(), Error> {
 
-    let s = String::from("0.0.0.0:").to_string() + &port.to_string();
-    let listener = TcpListener::bind(s).unwrap();
+    let addr = String::from("0.0.0.0:").to_string() + &port.to_string();
+    let listener = TcpListener::bind(addr).unwrap();
     let mut v_thread: Vec<thread::JoinHandle<()>> = Vec::new();
 
     for stream in listener.incoming() {
