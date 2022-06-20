@@ -1,4 +1,4 @@
-use std::io::{Error, Read, Write};
+use std::io::{self, Error, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::{thread, default};
 use std::time;
@@ -42,6 +42,9 @@ struct State
     /* Transport type 0-bin 1-ascii */
     trans_type: i8,
     listener: TcpListener,
+    /* 0-not connect 1-connected */
+    status : u8,
+    t_port: (u16, u16),
 }
 
 // static CMD_LIST_VALUE: &'static [&str] = &[
@@ -63,22 +66,22 @@ fn ftp_pass(&self) -> String {
 
 // PASV
 fn ftp_pasv(&mut self) -> String {
-    let mut tu_port:(u16, u16) = (0, 0);
 
-    let mut rng = rand::thread_rng();
-
-    let seed: u16 = rng.gen();
-    tu_port.0 = 0b10000000 + seed % 0b1000000;
-    tu_port.1 = seed % 0xff;
-
-    // let mut ip: [u32; 4] = [0, 0, 0, 0];
-
-    let port = (0x100 * tu_port.0) + tu_port.1;
-    let addr = String::from("0.0.0.0:").to_string() + &port.to_string();
-    self.listener = TcpListener::bind(addr).unwrap();
-    self.mode = TransMod::SERVER;
+    if self.status == 0 {
+        let mut rng = rand::thread_rng();
     
-    "227 Entering Passive Mode 0,0,0,0,".to_owned() + &tu_port.0.to_string() + "," + &tu_port.1.to_string() + "\n"
+        let seed: u16 = rng.gen();
+        self.t_port.0 = 0b10000000 + seed % 0b1000000;
+        self.t_port.1 = seed % 0xff;
+    
+        let port = (0x100 * self.t_port.0) + self.t_port.1;
+        let addr = String::from("0.0.0.0:").to_string() + &port.to_string();
+        self.listener = TcpListener::bind(addr).unwrap();
+        self.mode = TransMod::SERVER;
+        self.status = 1;
+    }
+    
+    "227 Entering Passive Mode 0,0,0,0,".to_owned() + &self.t_port.0.to_string() + "," + &self.t_port.1.to_string() + "\n"
 }
 
 
@@ -98,30 +101,25 @@ fn ftp_pwd(&self) -> String {
 fn ftp_list(&mut self) -> String {
 
     for stream in self.listener.incoming() {
-        let default_path = self.get_pwd().to_owned();
-        let ls_paths = fs::read_dir(default_path).unwrap();
-        let mut message = String::from("");
-        for _path in ls_paths {
-            message = message.to_owned() + _path.unwrap().path().as_os_str().to_str().unwrap() + "\n";
+        match stream {
+            Ok(mut s) => {
+                let default_path = self.get_pwd().to_owned();
+                let ls_paths = fs::read_dir(default_path).unwrap();
+                for _path in ls_paths {
+                   s.write((_path.unwrap().path().as_os_str().to_str().unwrap().to_owned() + "\n").as_bytes());
+                }
+            }
+            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                break;
+            }
+            Err(e) => panic!("encountered IO error: {}", e),
         }
-        let mut stream = stream.expect("failed!");
-        thread::spawn(move|| {
-            stream.write("".as_bytes());
-        });
+        break;
     }
 
     "200 Ok!\n".to_owned()
 }
 
-
-// 发送数据
-fn stream_write(&mut self ,mut stream: TcpStream) -> Result<(), Error>{
-    
-    stream.write(self.message.as_bytes())?;
-    self.message.clear();
-
-    Ok(())
-}
 // SYST
 fn ftp_syst(&self) -> String {
     "200 🐶🐶 \n".to_owned()
@@ -131,6 +129,12 @@ fn ftp_syst(&self) -> String {
 fn ftp_stor(&self) -> String {
 
     "".to_owned()
+}
+
+// QUIT
+fn ftp_quit(&self) -> String {
+    
+    "221 Goodbye!\n".to_owned()
 }
 
 }
@@ -149,6 +153,8 @@ fn handle_client(mut stream: TcpStream) -> Result<(), Error>{
         sock_port: 0,
         trans_type: 0,
         listener: TcpListener::bind("0.0.0.0:9527").unwrap(),
+        status: 0,
+        t_port: (0, 0),
     };
 
     loop {
@@ -165,7 +171,7 @@ fn handle_client(mut stream: TcpStream) -> Result<(), Error>{
 
         for (_, it) in buf.iter().enumerate() {
             if (*it == 0x20 || *it == 0x0A || *it == 0x0D) && cmd.command.is_empty() {
-                cmd.command = String::from_utf8(t_cmd.clone()).unwrap();  //char[] -> string
+                cmd.command = String::from_utf8(t_cmd.clone()).unwrap();  /* char[] -> string */
                 t_cmd.clear();
                 continue;
             } else if *it != 0x0 {
@@ -183,9 +189,14 @@ fn handle_client(mut stream: TcpStream) -> Result<(), Error>{
             "PWD" => w_buf = state.ftp_pwd(),
             "PASV" => w_buf = state.ftp_pasv(),
             "SYST" => w_buf = state.ftp_syst(),
-            "LIST" => w_buf = state.ftp_list(),
+            "QUIT" => w_buf = state.ftp_quit(),
+            "LIST" => {
+                stream.write("150 Here comes the directory listing.\n".as_bytes())?;
+                w_buf = state.ftp_list();
+            },
             "STOR" => w_buf = state.ftp_stor(),
-            _=>println!("commond invalid!"),
+
+            _=> w_buf = "500 Unknown command 🙅\n".to_owned(),
         }
         stream.write(&w_buf.as_bytes())?;
         thread::sleep(time::Duration::from_secs(1 as u64));
