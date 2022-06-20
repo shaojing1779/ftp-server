@@ -3,14 +3,15 @@ use std::net::{TcpListener, TcpStream};
 use std::{thread, default};
 use std::time;
 use std::env;
+use std::collections;
 use rand::Rng;
-use std::fs;
+use std::fs::{self, File};
 use std::collections::LinkedList;
 use std::sync::Mutex;
 
 
 // Request type
-enum Cmdlist 
+enum Cmdlist
 { 
   ABOR, CWD, DELE, LIST, MDTM, MKD, NLST, PASS, PASV,
   PORT, PWD, QUIT, RETR, RMD, RNFR, RNTO, SITE, SIZE,
@@ -45,6 +46,7 @@ struct State
     /* 0-not connect 1-connected */
     status : u8,
     t_port: (u16, u16),
+    cmd: (String, String),
 }
 
 // static CMD_LIST_VALUE: &'static [&str] = &[
@@ -103,8 +105,7 @@ fn ftp_list(&mut self) -> String {
     for stream in self.listener.incoming() {
         match stream {
             Ok(mut s) => {
-                let default_path = self.get_pwd().to_owned();
-                let ls_paths = fs::read_dir(default_path).unwrap();
+                let ls_paths = fs::read_dir(self.get_pwd().to_owned()).unwrap();
                 for _path in ls_paths {
                    s.write((_path.unwrap().path().as_os_str().to_str().unwrap().to_owned() + "\n").as_bytes());
                 }
@@ -123,6 +124,28 @@ fn ftp_list(&mut self) -> String {
 // SYST
 fn ftp_syst(&self) -> String {
     "200 🐶🐶 \n".to_owned()
+}
+
+// RETR
+fn ftp_retr(&self) -> String {
+
+    for stream in self.listener.incoming() {
+        match stream {
+            Ok(mut s) => {
+                let mut f = File::open(self.get_pwd().to_owned() + "/" + &self.cmd.1).unwrap();
+                let mut buf = vec![];
+                f.read(&mut buf).expect("buffer overflow");
+                s.write(&buf);
+            }
+            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                break;
+            }
+            Err(e) => panic!("encountered IO error: {}", e),
+        }
+        break;
+    }
+
+    "226 File send OK.\n".to_owned()
 }
 
 // STOR
@@ -155,6 +178,7 @@ fn handle_client(mut stream: TcpStream) -> Result<(), Error>{
         listener: TcpListener::bind("0.0.0.0:9527").unwrap(),
         status: 0,
         t_port: (0, 0),
+        cmd: (String::from(""), String::from("")),
     };
 
     loop {
@@ -162,34 +186,35 @@ fn handle_client(mut stream: TcpStream) -> Result<(), Error>{
         if bytes_read == 0 {
             return Ok(());
         }
-
-        let mut cmd = Command {
-            command : String::from(""),
-            arg : String::from(""),
-        };
-        let mut t_cmd:Vec<u8> = Vec::new();
-
+        state.cmd = (String::from(""), String::from(""));
+        let mut t_cmd:Vec<u8> = vec![];
         for (_, it) in buf.iter().enumerate() {
-            if (*it == 0x20 || *it == 0x0A || *it == 0x0D) && cmd.command.is_empty() {
-                cmd.command = String::from_utf8(t_cmd.clone()).unwrap();  /* char[] -> string */
+            if (*it == 0x20 || *it == 0x0A || *it == 0x0D) && state.cmd.0.is_empty() {
+                state.cmd.0 = String::from_utf8(t_cmd.clone()).unwrap();  /* char[] -> string */
                 t_cmd.clear();
                 continue;
             } else if *it != 0x0 {
                 t_cmd.push(*it);
+            } else {
+                continue;
             }
         }
 
-        cmd.arg = String::from_utf8(t_cmd.clone()).unwrap();
+        state.cmd.1 = String::from_utf8(t_cmd.clone()).unwrap();
 
-        println!("split_test:{}, {}", cmd.command, cmd.arg);
+        println!("state->cmd:{:?}", state.cmd);
         let mut w_buf = String::new();
-        match &cmd.command as &str {
+        match &state.cmd.0 as &str {
             "USER" => w_buf = state.ftp_user(),
             "PASS" => w_buf = state.ftp_pass(),
             "PWD" => w_buf = state.ftp_pwd(),
             "PASV" => w_buf = state.ftp_pasv(),
             "SYST" => w_buf = state.ftp_syst(),
             "QUIT" => w_buf = state.ftp_quit(),
+            "RETR" => {
+                stream.write("150 Opening BINARY mode data connection.\n".as_bytes())?;
+                w_buf = state.ftp_retr()
+            },
             "LIST" => {
                 stream.write("150 Here comes the directory listing.\n".as_bytes())?;
                 w_buf = state.ftp_list();
