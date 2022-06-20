@@ -1,16 +1,19 @@
 use std::io::{Error, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::{thread};
+use std::{thread, default};
 use std::time;
 use std::env;
 use rand::Rng;
+use std::fs;
+use std::collections::LinkedList;
+use std::sync::{Arc, Mutex};
 
 // Request type
 enum Cmdlist 
 { 
-  ABOR(u16), CWD(u16), DELE(u16), LIST(u16), MDTM(u16), MKD(u16), NLST(u16), PASS(u16), PASV(u16),
-  PORT(u16), PWD(u16), QUIT(u16), RETR(u16), RMD(u16), RNFR(u16), RNTO(u16), SITE(u16), SIZE(u16),
-  STOR(u16), TYPE(u16), CDUP(u16), USER(u16), NOOP(u16), SYST
+  ABOR, CWD, DELE, LIST, MDTM, MKD, NLST, PASS, PASV,
+  PORT, PWD, QUIT, RETR, RMD, RNFR, RNTO, SITE, SIZE,
+  STOR, TYPE, CDUP, USER, NOOP, SYST,
 }
 
 // Request command
@@ -20,11 +23,15 @@ struct Command
     arg: String,
 }
 
+enum TransMod {
+    NORMAL, SERVER, CLIENT,
+}
+
 // user connect info
 struct State
 {
     // Connection mode: 0-NORMAL, 1-SERVER, 2-CLIENT
-    mode: i8,
+    mode: TransMod,
     user_name: String,
     message: String,
     /* PASV MOD*/
@@ -33,25 +40,28 @@ struct State
     sock_port: u32,
     /* Transport type 0-bin 1-ascii */
     trans_type: i8,
+    listener: TcpListener,
 }
 
-static CMD_LIST_VALUE: &'static [&str] = &[
-    "ABOR", "CWD", "DELE", "LIST", "MDTM", "MKD", "NLST", "PASS", "PASV",
-    "PORT", "PWD", "QUIT", "RETR", "RMD", "RNFR", "RNTO", "SITE", "SIZE",
-    "STOR", "TYPE", "CDUP", "USER", "NOOP", "SYST"];
+// static CMD_LIST_VALUE: &'static [&str] = &[
+//     "ABOR", "CWD", "DELE", "LIST", "MDTM", "MKD", "NLST", "PASS", "PASV",
+//     "PORT", "PWD", "QUIT", "RETR", "RMD", "RNFR", "RNTO", "SITE", "SIZE",
+//     "STOR", "TYPE", "CDUP", "USER", "NOOP", "SYST"];
 
+impl State {
+    
 // USER
-fn ftp_user() -> String {
+fn ftp_user(&self) -> String {
     "331 User name okay, need password\n".to_owned()
 }
 
 // PASS
-fn ftp_pass() -> String {
+fn ftp_pass(&self) -> String {
     "230 Login successful\n".to_owned()
 }
 
 // PASV
-fn ftp_pasv(state: &State) -> String {
+fn ftp_pasv(&mut self) -> String {
     let mut tu_port:(u16, u16) = (0, 0);
 
     let mut rng = rand::thread_rng();
@@ -64,13 +74,26 @@ fn ftp_pasv(state: &State) -> String {
 
     let port = (0x100 * tu_port.0) + tu_port.1;
     let addr = String::from("0.0.0.0:").to_string() + &port.to_string();
-    let listener = TcpListener::bind(addr).unwrap();
+    self.listener = TcpListener::bind(addr).unwrap();
+    self.mode = TransMod::SERVER;
 
-    "".to_owned()
+    // let mut counter = 0;
+
+    // for stream in self.listener.incoming() {
+    //     if counter > 1 {
+    //         break;
+    //     }
+    //     let stream = stream.expect("failed!");
+    //     self.tcp_stream.push_back(stream);
+    //     counter += 1;
+    // }
+    println!("LOG_push_back");
+    
+    "227 Entering Passive Mode 0,0,0,0,".to_owned() + &tu_port.0.to_string() + "," + &tu_port.1.to_string() + "\n"
 }
 
 
-fn get_pwd() -> String {
+fn get_pwd(&self) -> String {
     let res = env::current_dir();
     match res {
         Ok(path) => path.into_os_string().into_string().unwrap(),
@@ -78,24 +101,43 @@ fn get_pwd() -> String {
     }
 }
 // PWD
-fn ftp_pwd() -> String {
-    get_pwd().to_owned() + "\n"
+fn ftp_pwd(&self) -> String {
+    self.get_pwd().to_owned() + "\n"
 }
 
 // LIST
-fn ftp_list() -> String {
-    get_pwd().to_owned() + "\n"
+fn ftp_list(&mut self) -> String {
+    let default_path = self.get_pwd().to_owned();
+    let ls_paths = fs::read_dir(default_path).unwrap();
+    for _path in ls_paths {
+        self.message = self.message.to_owned() + _path.unwrap().path().as_os_str().to_str().unwrap() + "\n";
+    }
+
+    let mut count :u32 = 0;
+    for stream in self.listener.incoming() {
+
+        if count > 1 {
+            break;
+        }
+        let mut stream = stream.unwrap();
+        stream.write(self.message.as_bytes()).unwrap();
+        count += 1;
+    }
+
+    "200 Ok!\n".to_owned()
 }
 
 // SYST
-fn ftp_syst() -> String {
+fn ftp_syst(&self) -> String {
     "200 🐶🐶 \n".to_owned()
 }
 
 // STOR
-fn ftp_stor() -> String {
+fn ftp_stor(&self) -> String {
 
     "".to_owned()
+}
+
 }
 
 fn handle_client(mut stream: TcpStream) -> Result<(), Error>{
@@ -104,13 +146,14 @@ fn handle_client(mut stream: TcpStream) -> Result<(), Error>{
     let welcome = "200 Welcome to FTP service.\n";
     stream.write(welcome.as_bytes())?;
 
-    let state = State {
+    let mut state = State {
         user_name : "".to_owned(),
-        mode: 0,
+        mode: TransMod::NORMAL,
         message: "".to_owned(),
         sock_pasv: 0,
         sock_port: 0,
         trans_type: 0,
+        listener: TcpListener::bind("0.0.0.0:9527").unwrap(),
     };
 
     loop {
@@ -125,13 +168,13 @@ fn handle_client(mut stream: TcpStream) -> Result<(), Error>{
         };
         let mut t_cmd:Vec<u8> = Vec::new();
 
-        for it in buf {
-            if (it == 0x20 || it == 0x0A || it == 0x0D) && cmd.command.is_empty() {
+        for (_, it) in buf.iter().enumerate() {
+            if (*it == 0x20 || *it == 0x0A || *it == 0x0D) && cmd.command.is_empty() {
                 cmd.command = String::from_utf8(t_cmd.clone()).unwrap();  //char[] -> string
                 t_cmd.clear();
                 continue;
-            } else if it != 0x0 {
-                t_cmd.push(it);
+            } else if *it != 0x0 {
+                t_cmd.push(*it);
             }
         }
 
@@ -140,13 +183,13 @@ fn handle_client(mut stream: TcpStream) -> Result<(), Error>{
         println!("split_test:{}, {}", cmd.command, cmd.arg);
         let mut w_buf = String::new();
         match &cmd.command as &str {
-            "USER" => w_buf = ftp_user(),
-            "PASS" => w_buf = ftp_pass(),
-            "PWD" => w_buf = ftp_pwd(),
-            "PASV" => w_buf = ftp_pasv(&state),
-            "SYST" => w_buf = ftp_syst(),
-            "LIST" => w_buf = ftp_list(),
-            "STOR" => w_buf = ftp_stor(),
+            "USER" => w_buf = state.ftp_user(),
+            "PASS" => w_buf = state.ftp_pass(),
+            "PWD" => w_buf = state.ftp_pwd(),
+            "PASV" => w_buf = state.ftp_pasv(),
+            "SYST" => w_buf = state.ftp_syst(),
+            "LIST" => w_buf = state.ftp_list(),
+            "STOR" => w_buf = state.ftp_stor(),
             _=>println!("commond invalid!"),
         }
         stream.write(&w_buf.as_bytes())?;
