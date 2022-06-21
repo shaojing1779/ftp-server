@@ -136,16 +136,16 @@ fn ftp_retr(&self) -> String {
                 let mut buf = vec![];
                 f.read(&mut buf).expect("buffer overflow");
                 s.write(&buf);
+                break;
             }
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
                 break;
             }
             Err(e) => panic!("encountered IO error: {}", e),
         }
-        break;
     }
 
-    "226 File send OK.\n".to_owned()
+    "226 File:[".to_owned() + &self.get_pwd() + "/" + &self.cmd.1 + "] send OK.\n"
 }
 
 // STOR
