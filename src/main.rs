@@ -90,6 +90,7 @@ fn ftp_pasv(&mut self) -> String {
 fn get_pwd(&self) -> String {
     let res = env::current_dir();
     match res {
+        // path.to_string_lossy().to_string()
         Ok(path) => path.into_os_string().into_string().unwrap(),
         Err(_) => "FAILED".to_string()
     }
