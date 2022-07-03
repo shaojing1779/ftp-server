@@ -1,13 +1,14 @@
-use std::io::{self, Error, Read, Write};
-use std::net::{TcpListener, TcpStream};
-use std::{thread, default};
-use std::time;
-use std::env;
-use std::collections;
+use std::{
+    env,
+    io::{Error, Read},
+    fs::{self, File}
+};
+use tokio::{
+    self,
+    net::{TcpListener, TcpStream},
+    io::{AsyncWriteExt, AsyncReadExt}
+};
 use rand::Rng;
-use std::fs::{self, File};
-use std::collections::LinkedList;
-use std::sync::Mutex;
 
 
 // Request type
@@ -57,7 +58,13 @@ struct State
 impl State {
     
 // USER
-fn ftp_user(&self) -> String {
+fn ftp_user(&mut self) -> String {
+    if self.cmd.1.len() > 2 {
+        self.user_name = self.cmd.1[0..self.cmd.1.len() - 2].to_string();
+    } else {
+        self.user_name = "🐱".to_owned();
+    }
+
     "331 User name okay, need password\n".to_owned()
 }
 
@@ -67,18 +74,19 @@ fn ftp_pass(&self) -> String {
 }
 
 // PASV
-fn ftp_pasv(&mut self) -> String {
+async fn ftp_pasv(&mut self) -> String {
 
-    if self.status == 0 {
-        let mut rng = rand::thread_rng();
-    
-        let seed: u16 = rng.gen();
+    if self.status == 0 {  
+        let seed: u16 = rand::thread_rng().gen();
         self.t_port.0 = 0b10000000 + seed % 0b1000000;
         self.t_port.1 = seed % 0xff;
     
         let port = (0x100 * self.t_port.0) + self.t_port.1;
         let addr = String::from("0.0.0.0:").to_string() + &port.to_string();
-        self.listener = TcpListener::bind(addr).unwrap();
+        match TcpListener::bind(addr).await {
+            Ok(v) => self.listener = v,
+            Err(e)=> println!("Err: {}", e),
+        }
         self.mode = TransMod::SERVER;
         self.status = 1;
     }
@@ -101,22 +109,16 @@ fn ftp_pwd(&self) -> String {
 }
 
 // LIST
-fn ftp_list(&mut self) -> String {
+async fn ftp_list(&mut self) -> String {
 
-    for stream in self.listener.incoming() {
-        match stream {
-            Ok(mut s) => {
-                let ls_paths = fs::read_dir(self.get_pwd().to_owned()).unwrap();
-                for _path in ls_paths {
-                   s.write((_path.unwrap().path().as_os_str().to_str().unwrap().to_owned() + "\n").as_bytes());
-                }
-            }
-            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                break;
-            }
-            Err(e) => panic!("encountered IO error: {}", e),
+    let (mut s, _) = self.listener.accept().await.unwrap();
+
+    let ls_paths = fs::read_dir(self.get_pwd().to_owned()).unwrap();
+    for _path in ls_paths {
+        match s.write((_path.unwrap().path().as_os_str().to_str().unwrap().to_owned() + "\n").as_bytes()).await {
+            Ok(_) => (),
+            Err(e) => println!("Err: {}", e),
         }
-        break;
     }
 
     "200 Ok!\n".to_owned()
@@ -128,22 +130,16 @@ fn ftp_syst(&self) -> String {
 }
 
 // RETR
-fn ftp_retr(&self) -> String {
+async fn ftp_retr(&self) -> String {
 
-    for stream in self.listener.incoming() {
-        match stream {
-            Ok(mut s) => {
-                let mut f = File::open(self.get_pwd().to_owned() + "/" + &self.cmd.1).unwrap();
-                let mut buf = vec![];
-                f.read(&mut buf).expect("buffer overflow");
-                s.write(&buf);
-                break;
-            }
-            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                break;
-            }
-            Err(e) => panic!("encountered IO error: {}", e),
-        }
+    let (mut s, _) = self.listener.accept().await.unwrap();
+
+    let mut f = File::open(self.get_pwd().to_owned() + "/" + &self.cmd.1).unwrap();
+    let mut buf = vec![];
+    f.read(&mut buf).expect("buffer overflow");
+    match s.write(&buf).await {
+        Ok(_) => (),
+        Err(e) => println!("Err: {}", e),
     }
 
     "226 File:[".to_owned() + &self.get_pwd() + "/" + &self.cmd.1 + "] send OK.\n"
@@ -155,20 +151,16 @@ fn ftp_stor(&self) -> String {
     "".to_owned()
 }
 
-// QUIT
-fn ftp_quit(&self) -> String {
-    
-    "221 Goodbye!\n".to_owned()
 }
 
-}
-
-fn handle_client(mut stream: TcpStream) -> Result<(), Error>{
+async fn handle_client(mut stream: TcpStream) -> Result<(), Error>{
     let mut buf = [0; 512];
     
     let welcome = "200 Welcome to FTP service.\n";
-    stream.write(welcome.as_bytes())?;
-
+    if let Err(e) = stream.write_all(welcome.as_bytes()).await {
+        eprintln!("failed to write to socket; err = {:?}", e);
+    }
+    
     let mut state = State {
         user_name : "".to_owned(),
         mode: TransMod::NORMAL,
@@ -176,17 +168,18 @@ fn handle_client(mut stream: TcpStream) -> Result<(), Error>{
         sock_pasv: 0,
         sock_port: 0,
         trans_type: 0,
-        listener: TcpListener::bind("0.0.0.0:9527").unwrap(),
+        listener: TcpListener::bind("0.0.0.0:9527").await.unwrap(),
         status: 0,
         t_port: (0, 0),
         cmd: (String::from(""), String::from("")),
     };
 
     loop {
-        let bytes_read = stream.read(&mut buf)?;
-        if bytes_read == 0 {
-            return Ok(());
+        match stream.read(&mut buf).await {
+            Ok(v) => println!("bytes_read: {}", v),
+            Err(e) => println!("Err: {}", e),
         }
+
         state.cmd = (String::from(""), String::from(""));
         let mut t_cmd:Vec<u8> = vec![];
         for (_, it) in buf.iter().enumerate() {
@@ -203,63 +196,77 @@ fn handle_client(mut stream: TcpStream) -> Result<(), Error>{
 
         state.cmd.1 = String::from_utf8(t_cmd.clone()).unwrap();
 
-        println!("state->cmd:{:?}", state.cmd);
+        println!("[{}] state->cmd:{:?}", state.user_name, state.cmd);
         let mut w_buf = String::new();
         match &state.cmd.0 as &str {
             "USER" => w_buf = state.ftp_user(),
             "PASS" => w_buf = state.ftp_pass(),
             "PWD" => w_buf = state.ftp_pwd(),
-            "PASV" => w_buf = state.ftp_pasv(),
+            "PASV" => w_buf = state.ftp_pasv().await,
             "SYST" => w_buf = state.ftp_syst(),
-            "QUIT" => w_buf = state.ftp_quit(),
+            "QUIT" => return stream.write_all("221 Goodbye!\n".to_owned().as_bytes()).await,
             "RETR" => {
-                stream.write("150 Opening BINARY mode data connection.\n".as_bytes())?;
-                w_buf = state.ftp_retr()
+                match stream.write_all("150 Opening BINARY mode data connection.\n".as_bytes()).await {
+                    Ok(_) => (),
+                    Err(e) => println!("Err: {}", e),
+                }
+                w_buf = state.ftp_retr().await
             },
             "LIST" => {
-                stream.write("150 Here comes the directory listing.\n".as_bytes())?;
-                w_buf = state.ftp_list();
+                match stream.write_all("150 Here comes the directory listing.\n".as_bytes()).await {
+                    Ok(_) => (),
+                    Err(e) => println!("Err: {}", e),
+                }
+                w_buf = state.ftp_list().await;
             },
             "STOR" => w_buf = state.ftp_stor(),
 
             _=> w_buf = "500 Unknown command 🙅\n".to_owned(),
         }
-        stream.write(&w_buf.as_bytes())?;
-        thread::sleep(time::Duration::from_secs(1 as u64));
+        match stream.write_all(&w_buf.as_bytes()).await {
+            Ok(_) => (),
+            Err(e) => println!("Err: {}", e),
+        }
     }
 
 }
 
 
-fn server(port: &u32)  -> Result<(), Error> {
+async fn server(port: &u32)  -> Result<(), Error> {
 
     let addr = String::from("0.0.0.0:").to_string() + &port.to_string();
-    let listener = TcpListener::bind(addr).unwrap();
-    let mut v_thread: Vec<thread::JoinHandle<()>> = Vec::new();
+    let listener = TcpListener::bind(addr).await?;
+    let mut handles = vec![];
+    loop {
+        match listener.accept().await {
+            Ok((socket, addr)) => {
+                println!("new client: {:?}", &addr);
+                handles.push(
+                    tokio::spawn(async move{
+                        match handle_client(socket).await {
+                            Ok(_) => (),
+                            Err(e) => println!("Err: {}", e),
+                        }
+                    })
 
-    for stream in listener.incoming() {
-        let stream = stream.expect("failed!");
-        let handle = thread::spawn(move || {
-            handle_client(stream)
-        .unwrap_or_else(|error| eprintln!("{:?}", error));
-        });
-        v_thread.push(handle);
+                );
+            },
+            Err(e) => println!("couldn't get client: {:?}", e),
+        }
     }
-
-    for handle in v_thread {
-        handle.join().unwrap();
-    }
-    Ok(())
 }
-
-fn main() -> std::io::Result<()> {
+#[tokio::main]
+async fn main() -> std::io::Result<()> {
 
     let args: Vec<String> = env::args().collect();
     let mut port: u32= 2022;
     if args.len() > 1 {
         port = args[1].parse().unwrap();
     }
-    let err = server(&port);
+    match server(&port).await {
+        Ok(_) => (),
+        Err(e) => println!("Err: {}", e),
+    }
 
     Ok(())
 }
